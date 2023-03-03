@@ -1,13 +1,11 @@
 use std::{
-	ascii::AsciiExt,
 	char,
-	io::{stdin, Read, Write},
-	net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
-	ops::Add,
+	io::{Read, Write},
+	net::{SocketAddr, TcpListener},
 	path::Path,
 	process::Stdio,
 	sync::mpsc,
-	thread::{self, Thread},
+	thread,
 	time::Duration,
 };
 
@@ -17,75 +15,6 @@ struct RconPacket {
 	id: i32,
 	ptype: i32,
 	body: String,
-}
-
-fn main() {
-	let sockaddr: SocketAddr = "127.0.0.1:49634".parse().expect("invalid ip");
-
-	let listener = TcpListener::bind(sockaddr).unwrap();
-	let (mut stream, addr) = listener.accept().unwrap();
-
-	loop {
-		// match stream.read(&mut [0; 0]) {
-		// 	Ok(_) => println!("open"),
-		// 	Err(_) => println!("closed"),
-		// }
-
-		println!("listening for packet");
-		let mut sized_buf = [0; 4096];
-		stream.read(&mut sized_buf).unwrap();
-
-		dbg!(&sized_buf[0..64]);
-
-		let received_packet = deserialize_packet(&sized_buf);
-
-		match received_packet.ptype {
-			0 => {
-				println!("rec 0");
-			}
-			2 => {
-				println!("rec 2");
-				let string = format!("Received Command: {}\0", received_packet.body);
-				let packet = RconPacket {
-					size: (9 + string.len()) as i32,
-					id: received_packet.id,
-					ptype: 0,
-					body: string,
-				};
-
-				let response_buf = serialize_packet(&packet);
-				stream.write_all(&response_buf).unwrap();
-				stream.flush().unwrap();
-
-				// let string = "\0".to_string();
-				// let packet = RconPacket {
-				// 	size: (9 + string.len()) as i32,
-				// 	id: received_packet.id,
-				// 	ptype: 0,
-				// 	body: string,
-				// };
-
-				// let response_buf = serialize_packet(&packet);
-				// stream.write_all(&response_buf).unwrap();
-				// stream.flush().unwrap();
-			}
-			3 => {
-				println!("rec 3");
-
-				let packet = RconPacket {
-					size: 10,
-					id: received_packet.id,
-					ptype: 2,
-					body: "\0".to_string(),
-				};
-
-				let response_buf = serialize_packet(&packet);
-				stream.write_all(&response_buf).unwrap();
-				stream.flush().unwrap();
-			}
-			_ => panic!("wtf"),
-		}
-	}
 }
 
 fn deserialize_packet(buf: &[u8]) -> RconPacket {
@@ -101,7 +30,7 @@ fn deserialize_packet(buf: &[u8]) -> RconPacket {
 			return_val.replace("\0", "")
 		},
 	};
-	dbg!(&deserialized);
+
 	deserialized
 }
 
@@ -129,12 +58,10 @@ fn serialize_packet(serialized: &RconPacket) -> Vec<u8> {
 		buf[c.0 + 12] = c.1 as u8;
 	}
 
-	dbg!(&serialized);
-
 	buf
 }
 
-fn main2() {
+fn main() {
 	let (tx, rx) = mpsc::channel();
 
 	let mut proc = std::process::Command::new(
@@ -145,15 +72,90 @@ fn main2() {
 
 	thread::spawn(move || {
 		let sockaddr: SocketAddr = "127.0.0.1:49634".parse().expect("invalid ip");
+
+		let listener = TcpListener::bind(sockaddr).unwrap();
+
 		loop {
-			let listener = TcpListener::bind(sockaddr).unwrap();
 			let (mut stream, addr) = listener.accept().unwrap();
-			let mut buf = String::new();
 
-			stream.read_to_string(&mut buf).unwrap();
+			loop {
+				let mut sized_buf = [0; 4096];
+				stream.read(&mut sized_buf).unwrap();
 
-			tx.send(buf).unwrap();
+				let received_packet = deserialize_packet(&sized_buf);
+
+				match received_packet.ptype {
+					0 => {
+						if sized_buf == [0; 4096] {
+							println!("client exit");
+							stream.shutdown(std::net::Shutdown::Both).ok();
+							break;
+						}
+					}
+
+					2 => {
+						// println!("rec 2");
+
+						let buf = received_packet.body;
+						// stream.read_to_string(&mut buf).unwrap();
+
+						let string = format!("Received Command: {}\0", &buf);
+						
+						tx.send(buf).unwrap();
+						
+						let packet = RconPacket {
+							size: (9 + string.len()) as i32,
+							id: received_packet.id,
+							ptype: 0,
+							body: string,
+						};
+						
+						let response_buf = serialize_packet(&packet);
+						stream.write_all(&response_buf).unwrap();
+						stream.flush().unwrap();
+
+						// let string = "\0".to_string();
+						// let packet = RconPacket {
+						// 	size: (9 + string.len()) as i32,
+						// 	id: received_packet.id,
+						// 	ptype: 0,
+						// 	body: string,
+						// };
+
+						// let response_buf = serialize_packet(&packet);
+						// stream.write_all(&response_buf).unwrap();
+						// stream.flush().unwrap();
+					}
+					3 => {
+						let packet = RconPacket {
+							size: 10,
+							id: received_packet.id,
+							ptype: 2,
+							body: "\0".to_string(),
+						};
+
+						let response_buf = serialize_packet(&packet);
+						stream.write_all(&response_buf).unwrap();
+						stream.flush().unwrap();
+					}
+					_ => {
+						println!("{}", received_packet.ptype);
+						break;
+					}
+				}
+			}
 		}
+
+		// let sockaddr: SocketAddr = "127.0.0.1:49634".parse().expect("invalid ip");
+		// loop {
+		// 	let listener = TcpListener::bind(sockaddr).unwrap();
+		// 	let (mut stream, addr) = listener.accept().unwrap();
+		// 	let mut buf = String::new();
+
+		// 	stream.read_to_string(&mut buf).unwrap();
+
+		// 	tx.send(buf).unwrap();
+		// }
 	});
 
 	let mut proc = proc
