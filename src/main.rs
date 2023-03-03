@@ -26,12 +26,17 @@ fn main() {
 	let (mut stream, addr) = listener.accept().unwrap();
 
 	loop {
+		// match stream.read(&mut [0; 0]) {
+		// 	Ok(_) => println!("open"),
+		// 	Err(_) => println!("closed"),
+		// }
+
 		println!("listening for packet");
 		let mut sized_buf = [0; 4096];
 		stream.read(&mut sized_buf).unwrap();
-		
-		
-		
+
+		dbg!(&sized_buf[0..64]);
+
 		let received_packet = deserialize_packet(&sized_buf);
 
 		match received_packet.ptype {
@@ -40,27 +45,38 @@ fn main() {
 			}
 			2 => {
 				println!("rec 2");
-
+				let string = format!("Received Command: {}\0", received_packet.body);
 				let packet = RconPacket {
-					size: 11,
+					size: (9 + string.len()) as i32,
 					id: received_packet.id,
 					ptype: 0,
-					body: "HLSW: Thhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhest".to_string(),
+					body: string,
 				};
 
 				let response_buf = serialize_packet(&packet);
-				// dbg!(&response_buf);
 				stream.write_all(&response_buf).unwrap();
 				stream.flush().unwrap();
+
+				// let string = "\0".to_string();
+				// let packet = RconPacket {
+				// 	size: (9 + string.len()) as i32,
+				// 	id: received_packet.id,
+				// 	ptype: 0,
+				// 	body: string,
+				// };
+
+				// let response_buf = serialize_packet(&packet);
+				// stream.write_all(&response_buf).unwrap();
+				// stream.flush().unwrap();
 			}
 			3 => {
 				println!("rec 3");
 
 				let packet = RconPacket {
-					size: 8,
+					size: 10,
 					id: received_packet.id,
 					ptype: 2,
-					body: "\0\0\0\0\0\0\0\0".to_string(),
+					body: "\0".to_string(),
 				};
 
 				let response_buf = serialize_packet(&packet);
