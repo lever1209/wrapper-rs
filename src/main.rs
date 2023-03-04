@@ -62,7 +62,10 @@ fn serialize_packet(serialized: &RconPacket) -> Vec<u8> {
 }
 
 fn main() {
-	let (tx, rx) = mpsc::channel();
+	let (server_write, server_read) = mpsc::channel();
+	let (client_write, client_read) = mpsc::channel();
+	let (recorder_write, recorder_read) = mpsc::channel::<String>();
+	// let (recorder_request_record, recorder_respond_record) = mpsc::channel::<()>();
 
 	let mut proc = std::process::Command::new(
 		Path::new("run/terraria/bin/TerrariaServer.bin.x86_64")
@@ -76,7 +79,7 @@ fn main() {
 		let listener = TcpListener::bind(sockaddr).unwrap();
 
 		loop {
-			let (mut stream, addr) = listener.accept().unwrap();
+			let (mut stream, addr) = listener.accept().unwrap(); // addr reserved for banlist or rcon whitelist
 
 			loop {
 				let mut sized_buf = [0; 4096];
@@ -99,17 +102,21 @@ fn main() {
 						let buf = received_packet.body;
 						// stream.read_to_string(&mut buf).unwrap();
 
-						let string = format!("Received Command: {}\0", &buf);
-						
-						tx.send(buf).unwrap();
-						
+						server_write.send(buf.clone()).unwrap();
+
+						let client_body = format!(
+							"Server Received Command: {}\n{}\0",
+							buf,
+							client_read.recv().unwrap()
+						);
+
 						let packet = RconPacket {
-							size: (9 + string.len()) as i32,
+							size: (9 + client_body.len()) as i32,
 							id: received_packet.id,
 							ptype: 0,
-							body: string,
+							body: client_body,
 						};
-						
+
 						let response_buf = serialize_packet(&packet);
 						stream.write_all(&response_buf).unwrap();
 						stream.flush().unwrap();
@@ -158,25 +165,37 @@ fn main() {
 		// }
 	});
 
-	let mut proc = proc
+	let proc = proc
 		.stdin(Stdio::piped())
 		.stderr(Stdio::inherit())
 		.stdout(Stdio::inherit())
 		.current_dir(Path::new("run/terraria/wdir").canonicalize().unwrap())
 		.spawn();
-	// .expect("spawn");
 
 	match proc {
 		Ok(mut child) => {
 			let mut stdin_pipe = child.stdin.take().expect("could not take stdin");
-
+			// let mut stdout_pipe = child.stdout.take().expect("could not take stdout");
 			loop {
-				match rx.recv_timeout(Duration::new(1, 0)) {
+				match server_read.recv_timeout(Duration::new(1, 0)) {
 					Ok(to_write) => {
+						
+						// recording thread that constantly prints pipe to stdout, and if request to record, copy to record
+							// potential bug when multiple commands execute at once? impossible, nature of stdin makes running multiple commands running at once impossible
+							// potential issue regarding how long to record stdout? SEVERE
+								// mitigations? permission based password system consisting of multiple "passwords" that are just hashes of passwords saved here, that will be calculated into hashes and compared to incoming hashes
+									// regex to match final output of command for success and error if error is possible
+									// timer to limit how long to wait for command to finish on a per command basis
+									// option to disable returning command output entirely
+									// 
+							
+						// start recording stdout
 						stdin_pipe
-							.write_all(to_write.as_bytes())
+							.write_all(format!("{}\n", to_write).as_bytes())
 							.expect("could not write to stdin of child");
 						stdin_pipe.flush().unwrap();
+						// stop recording stdout and save to RESPONSE
+						client_write.send("RESPONSE").unwrap();
 					}
 					Err(_) => match child.try_wait() {
 						Ok(Some(_)) => break,
