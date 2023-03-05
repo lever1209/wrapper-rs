@@ -1,5 +1,4 @@
 use std::{
-	char,
 	io::{Read, Write},
 	net::{SocketAddr, TcpListener},
 	path::Path,
@@ -9,59 +8,128 @@ use std::{
 	time::Duration,
 };
 
-#[derive(Debug)]
-struct RconPacket {
-	size: i32,
-	id: i32,
-	ptype: i32,
-	body: String,
-}
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
 
-fn deserialize_packet(buf: &[u8]) -> RconPacket {
-	let deserialized = RconPacket {
-		size: (&buf[0] << &buf[1] << &buf[2] << &buf[3]).into(),
-		id: (&buf[4] << &buf[5] << &buf[6] << &buf[7]).into(),
-		ptype: (&buf[8] << &buf[9] << &buf[10] << &buf[11]).into(),
-		body: {
-			let mut return_val = String::new();
-			for i in 12..(buf.len() - 2) {
-				return_val = return_val + (buf[i] as char).to_string().as_str();
-			}
-			return_val.replace("\0", "")
-		},
-	};
+use crate::config::banlist::*;
+use crate::config::packet::*;
 
-	deserialized
-}
+pub(crate) mod config {
+	use self::banlist::Banlist;
 
-fn serialize_packet(serialized: &RconPacket) -> Vec<u8> {
-	let max_body_size = serialized.body.clone().len() - 1;
-
-	let mut buf = vec![0; max_body_size + 14];
-
-	buf[0] = serialized.size as u8;
-	buf[1] = (serialized.size >> 8) as u8;
-	buf[2] = (serialized.size >> 16) as u8;
-	buf[3] = (serialized.size >> 24) as u8;
-
-	buf[4] = serialized.id as u8;
-	buf[5] = (serialized.id >> 8) as u8;
-	buf[6] = (serialized.id >> 16) as u8;
-	buf[7] = (serialized.id >> 24) as u8;
-
-	buf[8] = serialized.ptype as u8;
-	buf[9] = (serialized.ptype >> 8) as u8;
-	buf[10] = (serialized.ptype >> 16) as u8;
-	buf[11] = (serialized.ptype >> 24) as u8;
-
-	for c in serialized.body.clone().char_indices() {
-		buf[c.0 + 12] = c.1 as u8;
+	pub(crate) struct Config {
+		ban_list: Banlist,
+		password: String,
 	}
 
-	buf
+	pub(crate) mod banlist {
+		#[derive(Debug)]
+		pub(crate) enum BanType {
+			White,
+			Black,
+			WhiteAndBlack,
+			None,
+		}
+		#[derive(Debug)]
+		pub(crate) struct Banlist {
+			pub(crate) white: Vec<String>,
+			pub(crate) black: Vec<String>,
+			pub(crate) mode: BanType,
+		}
+
+		impl Banlist {
+			pub(crate) fn is_ip_banned(self: &Banlist, ip: String) -> bool {
+				!match self.mode {
+					BanType::White => self.white.contains(&ip),
+					BanType::Black => !self.black.contains(&ip),
+					BanType::WhiteAndBlack => self.white.contains(&ip) || !self.black.contains(&ip),
+					BanType::None => true,
+				}
+			}
+		}
+	}
+
+	pub(crate) mod packet {
+		#[derive(Debug)]
+		pub(crate) struct RconPacket {
+			pub(crate) size: i32,
+			pub(crate) id: i32,
+			pub(crate) ptype: i32,
+			pub(crate) body: String,
+		}
+
+		pub(crate) fn deserialize_packet(buf: &[u8]) -> RconPacket {
+			let deserialized = RconPacket {
+				size: (&buf[0] << &buf[1] << &buf[2] << &buf[3]).into(),
+				id: (&buf[4] << &buf[5] << &buf[6] << &buf[7]).into(),
+				ptype: (&buf[8] << &buf[9] << &buf[10] << &buf[11]).into(),
+				body: {
+					let mut return_val = String::new();
+					for i in 12..(buf.len() - 2) {
+						return_val = return_val + (buf[i] as char).to_string().as_str();
+					}
+					return_val.replace("\0", "")
+				},
+			};
+
+			deserialized
+		}
+
+		pub(crate) fn serialize_packet(serialized: &RconPacket) -> Vec<u8> {
+			let max_body_size = serialized.body.clone().len() - 1;
+
+			let mut buf = vec![0; max_body_size + 14];
+
+			buf[0] = serialized.size as u8;
+			buf[1] = (serialized.size >> 8) as u8;
+			buf[2] = (serialized.size >> 16) as u8;
+			buf[3] = (serialized.size >> 24) as u8;
+
+			buf[4] = serialized.id as u8;
+			buf[5] = (serialized.id >> 8) as u8;
+			buf[6] = (serialized.id >> 16) as u8;
+			buf[7] = (serialized.id >> 24) as u8;
+
+			buf[8] = serialized.ptype as u8;
+			buf[9] = (serialized.ptype >> 8) as u8;
+			buf[10] = (serialized.ptype >> 16) as u8;
+			buf[11] = (serialized.ptype >> 24) as u8;
+
+			for c in serialized.body.clone().char_indices() {
+				buf[c.0 + 12] = c.1 as u8;
+			}
+
+			buf
+		}
+	}
 }
 
 fn main() {
+	let ip = "192.168.2.80".to_string();
+
+	let banlist = Banlist {
+		white: vec![],
+		black: vec![],
+		mode: BanType::WhiteAndBlack,
+	};
+
+	println!("is banned? {}", banlist.is_ip_banned(ip));
+
+	// let hash = "$argon2i$v=19$m=65536,t=1,p=1$c29tZXNhbHQAAAAAAAAAAA$+r0d29hqEB0yasKr55ZgICsQGSkl0v0kgwhd+U3wyRo";
+	// let pass = "password";
+
+	// let password_hash = PasswordHash::new(&hash).expect("invalid password hash");
+
+	// let algs: &[&dyn PasswordVerifier] = &[&Argon2::default()];
+
+	// println!("start verify");
+	// match password_hash.verify_password(algs, pass) {
+	// 	Ok(_) => (),
+	// 	Err(_) => eprintln!("wrong"),
+	// }
+	// println!("end verify");
+
+	std::process::exit(0);
+
 	let (server_write, server_read) = mpsc::channel();
 	let (client_write, client_read) = mpsc::channel();
 	let (recorder_write, recorder_read) = mpsc::channel::<String>();
@@ -179,16 +247,16 @@ fn main() {
 			loop {
 				match server_read.recv_timeout(Duration::new(1, 0)) {
 					Ok(to_write) => {
-						
 						// recording thread that constantly prints pipe to stdout, and if request to record, copy to record
 							// potential bug when multiple commands execute at once? impossible, nature of stdin makes running multiple commands running at once impossible
 							// potential issue regarding how long to record stdout? SEVERE
 								// mitigations? permission based password system consisting of multiple "passwords" that are just hashes of passwords saved here, that will be calculated into hashes and compared to incoming hashes
-									// regex to match final output of command for success and error if error is possible
-									// timer to limit how long to wait for command to finish on a per command basis
-									// option to disable returning command output entirely
-									// 
-							
+								// regex to match final output of command for success and error if error is possible
+								// timer to limit how long to wait for command to finish on a per command basis
+								// option to disable returning command output entirely
+								// use dedicated after command that matches regex to let recorder know to stop recording?
+								//
+
 						// start recording stdout
 						stdin_pipe
 							.write_all(format!("{}\n", to_write).as_bytes())

@@ -1,9 +1,14 @@
 [package]
-name = "wrapper-rs"
-version = "0.0.0"
-edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+	name = "wrapper-rs"
+	version = "0.0.0"
+	edition = "2021"
 
 [dependencies]
-rcon = "0.6.0"
+	argon2 = "0.5.0"
+	rcon = "0.6.0"
+	serde = { version = "1.0.152", optional = true }
+	serde_yaml = { version = "0.9.18", optional = true }
+	sha-crypt = "0.5.0"
+
+[features]
+	config-file = ["serde", "serde_yaml"]	
