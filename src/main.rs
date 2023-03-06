@@ -1,26 +1,45 @@
 use std::{
 	io::{Read, Write},
-	net::{SocketAddr, TcpListener},
-	path::Path,
+	net::{IpAddr, SocketAddr, TcpListener},
 	process::Stdio,
+	str::FromStr,
 	sync::mpsc,
 	thread,
 	time::Duration,
+	vec,
 };
 
-use argon2::{Argon2, PasswordHash, PasswordVerifier};
+// use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use config::config::Config;
 
 use crate::config::banlist::*;
 use crate::config::packet::*;
 
 pub(crate) mod config {
-	use self::banlist::Banlist;
 
-	pub(crate) struct Config {
-		ban_list: Banlist,
-		password: String,
+	pub(crate) mod config {
+		use crate::config::banlist::Banlist;
+		use std::{net::IpAddr, path::PathBuf};
+		// pub(crate) struct User { // will go unused for now
+		// 	pub(crate)password: String,
+		// 	pub(crate)command_access: Vec<Command>,
+		// }
+
+		// pub(crate) struct Command {
+		// 	pub(crate)name: String,
+		// 	// pub(crate)args: Vec<String>, // should go unused for now
+		// }
+
+		pub(crate) struct Config {
+			pub(crate) ban_list: Banlist,
+			pub(crate) admin_password: String,
+			pub(crate) bin: PathBuf,
+			pub(crate) args: Vec<String>,
+			pub(crate) wdir: PathBuf,
+			pub(crate) port: u16,
+			pub(crate) bind: IpAddr, // users: Vec<User>,
+		}
 	}
-
 	pub(crate) mod banlist {
 		#[derive(Debug)]
 		pub(crate) enum BanType {
@@ -104,15 +123,17 @@ pub(crate) mod config {
 }
 
 fn main() {
-	let ip = "192.168.2.80".to_string();
+	// let ip = "192.168.2.80".to_string();
 
-	let banlist = Banlist {
-		white: vec![],
-		black: vec![],
-		mode: BanType::WhiteAndBlack,
-	};
+	// let banlist = Banlist {
+	// 	white: vec![],
+	// 	black: vec![],
+	// 	mode: BanType::WhiteAndBlack,
+	// };
 
-	println!("is banned? {}", banlist.is_ip_banned(ip));
+	// println!("is banned? {}", banlist.is_ip_banned(ip));
+
+	////////
 
 	// let hash = "$argon2i$v=19$m=65536,t=1,p=1$c29tZXNhbHQAAAAAAAAAAA$+r0d29hqEB0yasKr55ZgICsQGSkl0v0kgwhd+U3wyRo";
 	// let pass = "password";
@@ -128,26 +149,38 @@ fn main() {
 	// }
 	// println!("end verify");
 
-	std::process::exit(0);
+	// std::process::exit(0);
+	
+	
+
+	let config = Config {
+		ban_list: Banlist {
+			white: vec![],
+			black: vec![],
+			mode: BanType::WhiteAndBlack,
+		},
+		admin_password: "admin".to_string(),
+		bin: "run/terraria/bin/TerrariaServer.bin.x86_64".into(),
+		args: vec![],
+		port: 49634,
+		bind: IpAddr::from_str("127.0.0.1").unwrap(),
+		wdir: "run/terraria/wdir".into(),
+	};
 
 	let (server_write, server_read) = mpsc::channel();
 	let (client_write, client_read) = mpsc::channel();
 	let (recorder_write, recorder_read) = mpsc::channel::<String>();
 	// let (recorder_request_record, recorder_respond_record) = mpsc::channel::<()>();
 
-	let mut proc = std::process::Command::new(
-		Path::new("run/terraria/bin/TerrariaServer.bin.x86_64")
-			.canonicalize()
-			.unwrap(),
-	);
+	let mut proc = std::process::Command::new(config.bin.canonicalize().unwrap());
 
 	thread::spawn(move || {
-		let sockaddr: SocketAddr = "127.0.0.1:49634".parse().expect("invalid ip");
+		let sockaddr: SocketAddr = SocketAddr::new(config.bind, config.port);
 
 		let listener = TcpListener::bind(sockaddr).unwrap();
 
 		loop {
-			let (mut stream, addr) = listener.accept().unwrap(); // addr reserved for banlist or rcon whitelist
+			let (mut stream, addr) = listener.accept().unwrap();
 
 			loop {
 				let mut sized_buf = [0; 4096];
@@ -202,11 +235,20 @@ fn main() {
 						// stream.flush().unwrap();
 					}
 					3 => {
-						let packet = RconPacket {
-							size: 10,
-							id: received_packet.id,
-							ptype: 2,
-							body: "\0".to_string(),
+						let packet = if received_packet.body == config.admin_password {
+							RconPacket {
+								size: 10,
+								id: received_packet.id,
+								ptype: 2,
+								body: "\0".to_string(),
+							}
+						} else {
+							RconPacket {
+								size: 10,
+								id: -1,
+								ptype: 2,
+								body: "\0".to_string(),
+							}
 						};
 
 						let response_buf = serialize_packet(&packet);
@@ -237,7 +279,7 @@ fn main() {
 		.stdin(Stdio::piped())
 		.stderr(Stdio::inherit())
 		.stdout(Stdio::inherit())
-		.current_dir(Path::new("run/terraria/wdir").canonicalize().unwrap())
+		.current_dir(config.wdir.canonicalize().unwrap())
 		.spawn();
 
 	match proc {
@@ -248,14 +290,14 @@ fn main() {
 				match server_read.recv_timeout(Duration::new(1, 0)) {
 					Ok(to_write) => {
 						// recording thread that constantly prints pipe to stdout, and if request to record, copy to record
-							// potential bug when multiple commands execute at once? impossible, nature of stdin makes running multiple commands running at once impossible
-							// potential issue regarding how long to record stdout? SEVERE
-								// mitigations? permission based password system consisting of multiple "passwords" that are just hashes of passwords saved here, that will be calculated into hashes and compared to incoming hashes
-								// regex to match final output of command for success and error if error is possible
-								// timer to limit how long to wait for command to finish on a per command basis
-								// option to disable returning command output entirely
-								// use dedicated after command that matches regex to let recorder know to stop recording?
-								//
+						// potential bug when multiple commands execute at once? impossible, nature of stdin makes running multiple commands running at once impossible
+						// potential issue regarding how long to record stdout? SEVERE
+						// mitigations? permission based password system consisting of multiple "passwords" that are just hashes of passwords saved here, that will be calculated into hashes and compared to incoming hashes
+						// regex to match final output of command for success and error if error is possible
+						// timer to limit how long to wait for command to finish on a per command basis
+						// option to disable returning command output entirely
+						// use dedicated after command that matches regex to let recorder know to stop recording?
+						//
 
 						// start recording stdout
 						stdin_pipe
@@ -273,7 +315,7 @@ fn main() {
 				}
 			}
 		}
-		Err(_) => println!("proc failed to start"),
+		Err(e) => println!("proc failed to start: {e}"),
 	}
 
 	// proc.wait().unwrap();
