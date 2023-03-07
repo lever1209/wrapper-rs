@@ -204,7 +204,7 @@ fn main() {
 		.arg(arg!(--whitelist <path> "Whitelist path, newline delimited file of addresses to always allow, even if present in the blacklist").value_parser(value_parser!(PathBuf)))
 		.arg(arg!(--blacklist <path> "Blacklist path, newline delimited file of addresses to deny").value_parser(value_parser!(PathBuf)))
 		.arg(arg!(-b --bin <path> "Path to the program to execute").value_parser(value_parser!(PathBuf)).required(true))
-		.arg(arg!(-a --arg <argument> "Argument to pass to the program, can be used multiple times: -a arg1 -a arg2").value_parser(value_parser!(String)).action(ArgAction::Append))
+		.arg(arg!(-a --arg <argument> "Argument to pass to the program, can be used multiple times: -a arg1 -a arg2").value_parser(value_parser!(String)).action(ArgAction::Append).allow_hyphen_values(true))
 		.arg(arg!(-w --wdir <path> "Working directory to execute the program in").value_parser(value_parser!(PathBuf)))
 		// TODO mode to disable inserting newline at the end of every command, and instead interperet \n as newline and replace it before sending command
 		;
@@ -321,6 +321,7 @@ fn main() {
 		.stderr(Stdio::inherit())
 		.stdout(Stdio::inherit())
 		.current_dir(config.wdir.canonicalize().unwrap())
+		.args(config.args)
 		.spawn();
 
 	match proc {
@@ -346,7 +347,8 @@ fn main() {
 									start and exit commands with originating ip and username when supported to act as splits between commands to help with above
 
 						*/
-
+						
+						println!(); // to prevent strange logging
 						// start recording stdout
 						stdin_pipe
 							.write_all(format!("{}\n", to_write).as_bytes())
