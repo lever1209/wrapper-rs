@@ -5,7 +5,7 @@ use std::{
 	path::PathBuf,
 	process::Stdio,
 	str::FromStr,
-	sync::mpsc,
+	sync::{mpsc, Arc, Mutex},
 	thread,
 	time::Duration,
 	vec,
@@ -206,6 +206,7 @@ fn main() {
 		.arg(arg!(-b --bin <path> "Path to the program to execute").value_parser(value_parser!(PathBuf)).required(true))
 		.arg(arg!(-a --arg <argument> "Argument to pass to the program, can be used multiple times: -a arg1 -a arg2").value_parser(value_parser!(String)).action(ArgAction::Append))
 		.arg(arg!(-w --wdir <path> "Working directory to execute the program in").value_parser(value_parser!(PathBuf)))
+		// TODO mode to disable inserting newline at the end of every command, and instead interperet \n as newline and replace it before sending command
 		;
 
 	let matches = root_command.get_matches();
@@ -219,6 +220,7 @@ fn main() {
 
 	let (server_write, server_read) = mpsc::channel();
 	let (client_write, client_read) = mpsc::channel();
+
 	// let (recorder_write, recorder_read) = mpsc::channel::<String>();
 	// let (recorder_request_record, recorder_respond_record) = mpsc::channel::<()>();
 
@@ -253,7 +255,7 @@ fn main() {
 				match received_packet.ptype {
 					0 => {
 						if sized_buf == [0; 4096] {
-							println!("client exit");
+							// println!("client exit");
 							stream.shutdown(std::net::Shutdown::Both).ok();
 							break;
 						}
@@ -306,7 +308,7 @@ fn main() {
 						stream.flush().unwrap();
 					}
 					_ => {
-						println!("{}", received_packet.ptype);
+						eprintln!("{}", received_packet.ptype);
 						break;
 					}
 				}
@@ -324,18 +326,26 @@ fn main() {
 	match proc {
 		Ok(mut child) => {
 			let mut stdin_pipe = child.stdin.take().expect("could not take stdin");
+			// let mut stdout_pipe = Arc::new(Mutex::new(
+			// 	child.stdout.take().expect("could not take stdout"),
+			// ));
+			// let mut stderr_pipe = child.stderr.take().expect("could not take stderr");
+
 			loop {
 				match server_read.recv_timeout(Duration::new(1, 0)) {
 					Ok(to_write) => {
-						// recording thread that constantly prints pipe to stdout, and if request to record, copy to record
-						// potential bug when multiple commands execute at once? impossible, nature of stdin makes running multiple commands running at once impossible
-						// potential issue regarding how long to record stdout? SEVERE
-						// mitigations? permission based password system consisting of multiple "passwords" that are just hashes of passwords saved here, that will be calculated into hashes and compared to incoming hashes
-						// regex to match final output of command for success and error if error is possible
-						// timer to limit how long to wait for command to finish on a per command basis
-						// option to disable returning command output entirely
-						// use dedicated after command that matches regex to let recorder know to stop recording?
-						//
+						/*
+						recording thread that constantly prints pipe to stdout, and if request to record, copy to record
+							potential bug when multiple commands execute at once? impossible, nature of stdin makes running multiple commands running at once impossible
+							potential issue regarding how long to record stdout? SEVERE
+								mitigations? permission based password system consisting of multiple "passwords" that are just hashes of passwords saved here, that will be calculated into hashes and compared to incoming hashes
+								regex to match final output of command for success and error if error is possible
+								timer to limit how long to wait for command to finish on a per command basis
+								option to disable returning command output entirely
+								use dedicated after command that matches regex to let recorder know to stop recording?
+									start and exit commands with originating ip and username when supported to act as splits between commands to help with above
+
+						*/
 
 						// start recording stdout
 						stdin_pipe
@@ -353,6 +363,6 @@ fn main() {
 				}
 			}
 		}
-		Err(e) => println!("proc failed to start: {e}"),
+		Err(e) => eprintln!("proc failed to start: {e}"),
 	}
 }
