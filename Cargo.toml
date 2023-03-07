@@ -1,14 +1,15 @@
 [package]
-	name = "wrapper-rs"
-	version = "0.0.0"
-	edition = "2021"
+name = "wrapper-rs"
+version = "0.0.0"
+edition = "2021"
 
 [dependencies]
-	argon2 = "0.5.0"
-	rcon = "0.6.0"
-	serde = { version = "1.0.152", optional = true }
-	serde_yaml = { version = "0.9.18", optional = true }
-	sha-crypt = "0.5.0"
+argon2 = "0.5.0"
+clap = { version = "4.1.8" }
+rcon = "0.6.0"
+serde = { version = "1.0.152", optional = true }
+serde_yaml = { version = "0.9.18", optional = true }
+sha-crypt = "0.5.0"
 
 [features]
-	config-file = ["serde", "serde_yaml"]	
+config-file = ["serde", "serde_yaml"]

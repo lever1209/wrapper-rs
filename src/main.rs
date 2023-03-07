@@ -1,6 +1,8 @@
 use std::{
+	env, fs,
 	io::{Read, Write},
 	net::{IpAddr, SocketAddr, TcpListener},
+	path::PathBuf,
 	process::Stdio,
 	str::FromStr,
 	sync::mpsc,
@@ -9,61 +11,39 @@ use std::{
 	vec,
 };
 
-// use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use clap::{arg, value_parser, ArgAction, ArgMatches, Command};
 use config::config::Config;
 
-use crate::config::banlist::*;
 use crate::config::packet::*;
 
 pub(crate) mod config {
 
 	pub(crate) mod config {
-		use crate::config::banlist::Banlist;
-		use std::{net::IpAddr, path::PathBuf};
+		use std::{
+			net::{IpAddr, SocketAddr},
+			path::PathBuf,
+		};
+		// #[derive(Debug)]
 		// pub(crate) struct User { // will go unused for now
 		// 	pub(crate)password: String,
 		// 	pub(crate)command_access: Vec<Command>,
 		// }
 
+		// #[derive(Debug)]
 		// pub(crate) struct Command {
 		// 	pub(crate)name: String,
 		// 	// pub(crate)args: Vec<String>, // should go unused for now
 		// }
 
+		#[derive(Debug)]
 		pub(crate) struct Config {
-			pub(crate) ban_list: Banlist,
+			pub(crate) bind: SocketAddr,
 			pub(crate) admin_password: String,
 			pub(crate) bin: PathBuf,
 			pub(crate) args: Vec<String>,
 			pub(crate) wdir: PathBuf,
-			pub(crate) port: u16,
-			pub(crate) bind: IpAddr, // users: Vec<User>,
-		}
-	}
-	pub(crate) mod banlist {
-		#[derive(Debug)]
-		pub(crate) enum BanType {
-			White,
-			Black,
-			WhiteAndBlack,
-			None,
-		}
-		#[derive(Debug)]
-		pub(crate) struct Banlist {
-			pub(crate) white: Vec<String>,
-			pub(crate) black: Vec<String>,
-			pub(crate) mode: BanType,
-		}
-
-		impl Banlist {
-			pub(crate) fn is_ip_banned(self: &Banlist, ip: String) -> bool {
-				!match self.mode {
-					BanType::White => self.white.contains(&ip),
-					BanType::Black => !self.black.contains(&ip),
-					BanType::WhiteAndBlack => self.white.contains(&ip) || !self.black.contains(&ip),
-					BanType::None => true,
-				}
-			}
+			pub(crate) ips: Vec<IpAddr>,
+			pub(crate) is_whitelist: bool,
 		}
 	}
 
@@ -122,65 +102,162 @@ pub(crate) mod config {
 	}
 }
 
-fn main() {
-	// let ip = "192.168.2.80".to_string();
-
-	// let banlist = Banlist {
-	// 	white: vec![],
-	// 	black: vec![],
-	// 	mode: BanType::WhiteAndBlack,
-	// };
-
-	// println!("is banned? {}", banlist.is_ip_banned(ip));
-
-	////////
-
-	// let hash = "$argon2i$v=19$m=65536,t=1,p=1$c29tZXNhbHQAAAAAAAAAAA$+r0d29hqEB0yasKr55ZgICsQGSkl0v0kgwhd+U3wyRo";
-	// let pass = "password";
-
-	// let password_hash = PasswordHash::new(&hash).expect("invalid password hash");
-
-	// let algs: &[&dyn PasswordVerifier] = &[&Argon2::default()];
-
-	// println!("start verify");
-	// match password_hash.verify_password(algs, pass) {
-	// 	Ok(_) => (),
-	// 	Err(_) => eprintln!("wrong"),
-	// }
-	// println!("end verify");
-
-	// std::process::exit(0);
-	
-	
-
-	let config = Config {
-		ban_list: Banlist {
-			white: vec![],
-			black: vec![],
-			mode: BanType::WhiteAndBlack,
-		},
-		admin_password: "admin".to_string(),
-		bin: "run/terraria/bin/TerrariaServer.bin.x86_64".into(),
-		args: vec![],
-		port: 49634,
-		bind: IpAddr::from_str("127.0.0.1").unwrap(),
-		wdir: "run/terraria/wdir".into(),
+fn handle_config(matches: ArgMatches) -> Config {
+	let whitelist_path = matches.get_one::<PathBuf>("whitelist");
+	let whitelist_string = match whitelist_path {
+		Some(e) => {
+			if whitelist_path.unwrap().exists() {
+				fs::read_to_string(whitelist_path.unwrap()).unwrap()
+			} else {
+				"".to_string()
+			}
+		}
+		None => "".to_string(),
 	};
+	let blacklist_path = matches.get_one::<PathBuf>("blacklist");
+	let blacklist_string = match blacklist_path {
+		Some(e) => {
+			if blacklist_path.unwrap().exists() {
+				fs::read_to_string(blacklist_path.unwrap()).unwrap()
+			} else {
+				"".to_string()
+			}
+		}
+		None => "".to_string(),
+	};
+
+	let mut ips = vec![];
+	let mut is_whitelist = false;
+
+	if blacklist_string.is_empty() && whitelist_string.is_empty() {
+	} else if blacklist_string.is_empty() && !whitelist_string.is_empty() {
+		ips.append(&mut whitelist_string.split("\n").collect());
+		is_whitelist = true;
+	} else if !blacklist_string.is_empty() && whitelist_string.is_empty() {
+		ips.append(&mut blacklist_string.split("\n").collect());
+	} else if !blacklist_string.is_empty() && !whitelist_string.is_empty() {
+		ips.append(&mut blacklist_string.split("\n").collect());
+
+		let white_ips: Vec<&str> = whitelist_string.split("\n").collect();
+		for (index, ip) in ips.clone().iter().enumerate() {
+			if white_ips.contains(&ip) {
+				ips.remove(index);
+			}
+		}
+	};
+
+	let ips = {
+		let mut ips_return = vec![];
+
+		for ip in ips {
+			if ip.is_empty() {
+				continue;
+			}
+			ips_return.push(IpAddr::from_str(ip).unwrap());
+		}
+
+		ips_return
+	};
+
+	Config {
+		bind: if matches.get_one::<SocketAddr>("bind").is_some() {
+			*matches.get_one::<SocketAddr>("bind").unwrap()
+		} else {
+			SocketAddr::new(
+				IpAddr::from_str("0.0.0.0").unwrap(),
+				*matches.get_one("port").unwrap(),
+			)
+		},
+		admin_password: matches.get_one::<String>("password").unwrap().to_string(),
+		bin: matches
+			.get_one::<PathBuf>("bin")
+			.unwrap()
+			.to_path_buf()
+			.canonicalize()
+			.unwrap(),
+		args: matches
+			.get_many::<String>("arg")
+			.unwrap_or_default()
+			.into_iter()
+			.map(|x| x.into())
+			.collect(),
+		wdir: if matches.get_one::<PathBuf>("wdir").is_some() {
+			matches.get_one::<PathBuf>("wdir").unwrap().into()
+		} else {
+			env::current_dir().unwrap()
+		}
+		.canonicalize()
+		.unwrap(),
+		ips: ips,
+		is_whitelist: is_whitelist,
+	}
+}
+
+// fn main() {
+// 	let root_command = Command::new(env!("CARGO_PKG_NAME"))
+// 		.arg(
+// 			arg!(-a --arg <argument>)
+// 				.value_parser(value_parser!(String))
+// 				.action(ArgAction::Append),
+// 		);
+
+// 	let matches = root_command.get_matches();
+	
+// 	dbg!(matches);
+// }
+
+fn main() {
+	let root_command = Command::new(env!("CARGO_PKG_NAME"))
+		.version(env!("CARGO_PKG_VERSION"))
+		.author(env!("CARGO_PKG_AUTHORS"))
+		.about(env!("CARGO_PKG_DESCRIPTION"))
+		.arg(arg!(-p --port <port> "Port to bind to").conflicts_with("bind").value_parser(value_parser!(u16)).default_value("27015"))
+		.arg(arg!(--bind <"address:port"> "Bind value to use: 192.168.2.20:7777").conflicts_with("port").value_parser(value_parser!(SocketAddr)))//.default_value("0.0.0.0:27015"))
+		.arg(arg!(-P --password <password> "Admin password").value_parser(value_parser!(String)).required(true))
+		.arg(arg!(--whitelist <path> "Whitelist path, newline delimited file of addresses to always allow, even if present in the blacklist").value_parser(value_parser!(PathBuf)))
+		.arg(arg!(--blacklist <path> "Blacklist path, newline delimited file of addresses to deny").value_parser(value_parser!(PathBuf)))
+		.arg(arg!(-b --bin <path> "Path to the program to execute").value_parser(value_parser!(PathBuf)).required(true))
+		.arg(arg!(-a --arg <argument> "Argument to pass to the program, can be used multiple times: -a arg1 -a arg2").value_parser(value_parser!(String)).action(ArgAction::Append))
+		.arg(arg!(-w --wdir <path> "Working directory to execute the program in").value_parser(value_parser!(PathBuf)))
+		;
+
+	let matches = root_command.get_matches();
+
+	let config = handle_config(matches);
+
+	println!(
+		"Spawning process {:?} with args {:?} in wdir {:?} on bind {}",
+		config.bin, config.args, config.wdir, config.bind
+	);
+
+	// process::exit(0);
 
 	let (server_write, server_read) = mpsc::channel();
 	let (client_write, client_read) = mpsc::channel();
-	let (recorder_write, recorder_read) = mpsc::channel::<String>();
+	// let (recorder_write, recorder_read) = mpsc::channel::<String>();
 	// let (recorder_request_record, recorder_respond_record) = mpsc::channel::<()>();
 
 	let mut proc = std::process::Command::new(config.bin.canonicalize().unwrap());
 
 	thread::spawn(move || {
-		let sockaddr: SocketAddr = SocketAddr::new(config.bind, config.port);
+		let sockaddr: SocketAddr = config.bind;
 
 		let listener = TcpListener::bind(sockaddr).unwrap();
 
 		loop {
 			let (mut stream, addr) = listener.accept().unwrap();
+
+			if config.is_whitelist {
+				if !config.ips.contains(&addr.ip()) {
+					stream.shutdown(std::net::Shutdown::Both).ok();
+					break;
+				}
+			} else {
+				if config.ips.contains(&addr.ip()) {
+					stream.shutdown(std::net::Shutdown::Both).ok();
+					break;
+				}
+			}
 
 			loop {
 				let mut sized_buf = [0; 4096];
@@ -317,6 +394,4 @@ fn main() {
 		}
 		Err(e) => println!("proc failed to start: {e}"),
 	}
-
-	// proc.wait().unwrap();
 }
