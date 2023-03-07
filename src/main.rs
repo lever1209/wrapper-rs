@@ -107,7 +107,7 @@ fn handle_config(matches: ArgMatches) -> Config {
 	let whitelist_string = match whitelist_path {
 		Some(e) => {
 			if whitelist_path.unwrap().exists() {
-				fs::read_to_string(whitelist_path.unwrap()).unwrap()
+				fs::read_to_string(e).unwrap()
 			} else {
 				"".to_string()
 			}
@@ -118,7 +118,7 @@ fn handle_config(matches: ArgMatches) -> Config {
 	let blacklist_string = match blacklist_path {
 		Some(e) => {
 			if blacklist_path.unwrap().exists() {
-				fs::read_to_string(blacklist_path.unwrap()).unwrap()
+				fs::read_to_string(e).unwrap()
 			} else {
 				"".to_string()
 			}
@@ -193,19 +193,6 @@ fn handle_config(matches: ArgMatches) -> Config {
 	}
 }
 
-// fn main() {
-// 	let root_command = Command::new(env!("CARGO_PKG_NAME"))
-// 		.arg(
-// 			arg!(-a --arg <argument>)
-// 				.value_parser(value_parser!(String))
-// 				.action(ArgAction::Append),
-// 		);
-
-// 	let matches = root_command.get_matches();
-	
-// 	dbg!(matches);
-// }
-
 fn main() {
 	let root_command = Command::new(env!("CARGO_PKG_NAME"))
 		.version(env!("CARGO_PKG_VERSION"))
@@ -229,8 +216,6 @@ fn main() {
 		"Spawning process {:?} with args {:?} in wdir {:?} on bind {}",
 		config.bin, config.args, config.wdir, config.bind
 	);
-
-	// process::exit(0);
 
 	let (server_write, server_read) = mpsc::channel();
 	let (client_write, client_read) = mpsc::channel();
@@ -298,18 +283,6 @@ fn main() {
 						let response_buf = serialize_packet(&packet);
 						stream.write_all(&response_buf).unwrap();
 						stream.flush().unwrap();
-
-						// let string = "\0".to_string();
-						// let packet = RconPacket {
-						// 	size: (9 + string.len()) as i32,
-						// 	id: received_packet.id,
-						// 	ptype: 0,
-						// 	body: string,
-						// };
-
-						// let response_buf = serialize_packet(&packet);
-						// stream.write_all(&response_buf).unwrap();
-						// stream.flush().unwrap();
 					}
 					3 => {
 						let packet = if received_packet.body == config.admin_password {
@@ -339,17 +312,6 @@ fn main() {
 				}
 			}
 		}
-
-		// let sockaddr: SocketAddr = "127.0.0.1:49634".parse().expect("invalid ip");
-		// loop {
-		// 	let listener = TcpListener::bind(sockaddr).unwrap();
-		// 	let (mut stream, addr) = listener.accept().unwrap();
-		// 	let mut buf = String::new();
-
-		// 	stream.read_to_string(&mut buf).unwrap();
-
-		// 	tx.send(buf).unwrap();
-		// }
 	});
 
 	let proc = proc
@@ -362,7 +324,6 @@ fn main() {
 	match proc {
 		Ok(mut child) => {
 			let mut stdin_pipe = child.stdin.take().expect("could not take stdin");
-			// let mut stdout_pipe = child.stdout.take().expect("could not take stdout");
 			loop {
 				match server_read.recv_timeout(Duration::new(1, 0)) {
 					Ok(to_write) => {
