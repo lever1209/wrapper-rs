@@ -1,22 +1,37 @@
 use std::{
-	env, fs,
+	collections::HashMap,
+	hash::Hash,
 	io::{Read, Write},
-	net::{IpAddr, SocketAddr, TcpListener},
+	net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
 	path::PathBuf,
 	process::Stdio,
-	str::FromStr,
-	sync::{mpsc, Arc, Mutex},
+	sync::{
+		mpsc::{self, Receiver, Sender},
+		Arc, Mutex,
+	},
 	thread,
 	time::Duration,
-	vec,
 };
 
-use clap::{arg, value_parser, ArgAction, ArgMatches, Command};
-use config::config::Config;
+use clap::{arg, value_parser, ArgAction, Command};
 
-use crate::config::packet::*;
+use crate::{
+	config::packet::{deserialize_packet, serialize_packet, RconPacket},
+	messenger::{ChildReadRequest, ChildReadResponse, ServerCommandRequest, ServerCommandResponse},
+};
 
 pub(crate) mod config {
+	// FIXME messy as all hell in here
+	use std::{
+		env, fs,
+		net::{IpAddr, SocketAddr},
+		path::PathBuf,
+		str::FromStr,
+	};
+
+	use clap::ArgMatches;
+
+	use self::config::Config;
 
 	pub(crate) mod config {
 		use std::{
@@ -100,96 +115,121 @@ pub(crate) mod config {
 			buf
 		}
 	}
-}
 
-fn handle_config(matches: ArgMatches) -> Config {
-	let whitelist_path = matches.get_one::<PathBuf>("whitelist");
-	let whitelist_string = match whitelist_path {
-		Some(e) => {
-			if whitelist_path.unwrap().exists() {
-				fs::read_to_string(e).unwrap()
+	pub(crate) fn handle_config(matches: ArgMatches) -> Config {
+		let whitelist_path = matches.get_one::<PathBuf>("whitelist");
+		let whitelist_string = match whitelist_path {
+			Some(e) => {
+				if whitelist_path.unwrap().exists() {
+					fs::read_to_string(e).unwrap()
+				} else {
+					"".to_string()
+				}
+			}
+			None => "".to_string(),
+		};
+		let blacklist_path = matches.get_one::<PathBuf>("blacklist");
+		let blacklist_string = match blacklist_path {
+			Some(e) => {
+				if blacklist_path.unwrap().exists() {
+					fs::read_to_string(e).unwrap()
+				} else {
+					"".to_string()
+				}
+			}
+			None => "".to_string(),
+		};
+
+		let mut ips = vec![];
+		let mut is_whitelist = false;
+
+		if blacklist_string.is_empty() && whitelist_string.is_empty() {
+		} else if blacklist_string.is_empty() && !whitelist_string.is_empty() {
+			ips.append(&mut whitelist_string.split("\n").collect());
+			is_whitelist = true;
+		} else if !blacklist_string.is_empty() && whitelist_string.is_empty() {
+			ips.append(&mut blacklist_string.split("\n").collect());
+		} else if !blacklist_string.is_empty() && !whitelist_string.is_empty() {
+			ips.append(&mut blacklist_string.split("\n").collect());
+
+			let white_ips: Vec<&str> = whitelist_string.split("\n").collect();
+			for (index, ip) in ips.clone().iter().enumerate() {
+				if white_ips.contains(&ip) {
+					ips.remove(index);
+				}
+			}
+		};
+
+		let ips = {
+			let mut ips_return = vec![];
+
+			for ip in ips {
+				if ip.is_empty() {
+					continue;
+				}
+				ips_return.push(IpAddr::from_str(ip).unwrap());
+			}
+
+			ips_return
+		};
+
+		Config {
+			bind: if matches.get_one::<SocketAddr>("bind").is_some() {
+				*matches.get_one::<SocketAddr>("bind").unwrap()
 			} else {
-				"".to_string()
-			}
-		}
-		None => "".to_string(),
-	};
-	let blacklist_path = matches.get_one::<PathBuf>("blacklist");
-	let blacklist_string = match blacklist_path {
-		Some(e) => {
-			if blacklist_path.unwrap().exists() {
-				fs::read_to_string(e).unwrap()
+				SocketAddr::new(
+					IpAddr::from_str("0.0.0.0").unwrap(),
+					*matches.get_one("port").unwrap(),
+				)
+			},
+			admin_password: matches.get_one::<String>("password").unwrap().to_string(),
+			bin: matches
+				.get_one::<PathBuf>("bin")
+				.unwrap()
+				.to_path_buf()
+				.canonicalize()
+				.unwrap(),
+			args: matches
+				.get_many::<String>("arg")
+				.unwrap_or_default()
+				.into_iter()
+				.map(|x| x.into())
+				.collect(),
+			wdir: if matches.get_one::<PathBuf>("wdir").is_some() {
+				matches.get_one::<PathBuf>("wdir").unwrap().into()
 			} else {
-				"".to_string()
+				env::current_dir().unwrap()
 			}
-		}
-		None => "".to_string(),
-	};
-
-	let mut ips = vec![];
-	let mut is_whitelist = false;
-
-	if blacklist_string.is_empty() && whitelist_string.is_empty() {
-	} else if blacklist_string.is_empty() && !whitelist_string.is_empty() {
-		ips.append(&mut whitelist_string.split("\n").collect());
-		is_whitelist = true;
-	} else if !blacklist_string.is_empty() && whitelist_string.is_empty() {
-		ips.append(&mut blacklist_string.split("\n").collect());
-	} else if !blacklist_string.is_empty() && !whitelist_string.is_empty() {
-		ips.append(&mut blacklist_string.split("\n").collect());
-
-		let white_ips: Vec<&str> = whitelist_string.split("\n").collect();
-		for (index, ip) in ips.clone().iter().enumerate() {
-			if white_ips.contains(&ip) {
-				ips.remove(index);
-			}
-		}
-	};
-
-	let ips = {
-		let mut ips_return = vec![];
-
-		for ip in ips {
-			if ip.is_empty() {
-				continue;
-			}
-			ips_return.push(IpAddr::from_str(ip).unwrap());
-		}
-
-		ips_return
-	};
-
-	Config {
-		bind: if matches.get_one::<SocketAddr>("bind").is_some() {
-			*matches.get_one::<SocketAddr>("bind").unwrap()
-		} else {
-			SocketAddr::new(
-				IpAddr::from_str("0.0.0.0").unwrap(),
-				*matches.get_one("port").unwrap(),
-			)
-		},
-		admin_password: matches.get_one::<String>("password").unwrap().to_string(),
-		bin: matches
-			.get_one::<PathBuf>("bin")
-			.unwrap()
-			.to_path_buf()
 			.canonicalize()
 			.unwrap(),
-		args: matches
-			.get_many::<String>("arg")
-			.unwrap_or_default()
-			.into_iter()
-			.map(|x| x.into())
-			.collect(),
-		wdir: if matches.get_one::<PathBuf>("wdir").is_some() {
-			matches.get_one::<PathBuf>("wdir").unwrap().into()
-		} else {
-			env::current_dir().unwrap()
+			ips: ips,
+			is_whitelist: is_whitelist,
 		}
-		.canonicalize()
-		.unwrap(),
-		ips: ips,
-		is_whitelist: is_whitelist,
+	}
+}
+
+pub(crate) mod messenger {
+	use std::net::IpAddr;
+	#[derive(Debug)]
+	pub(crate) struct ChildReadRequest {
+		pub(crate) command: String,
+		pub(crate) ip: IpAddr,
+	}
+	#[derive(Debug)]
+	pub(crate) struct ChildReadResponse {
+		pub(crate) body: String,
+	}
+
+	#[derive(Debug)]
+	pub(crate) struct ServerCommandRequest {
+		pub(crate) command: String,
+		pub(crate) ip: IpAddr,
+	}
+	#[derive(Debug)]
+	pub(crate) struct ServerCommandResponse {
+		pub(crate) command: String,
+		pub(crate) ip: IpAddr,
+		pub(crate) body: String,
 	}
 }
 
@@ -211,115 +251,50 @@ fn main() {
 
 	let matches = root_command.get_matches();
 
-	let config = handle_config(matches);
+	let config = config::handle_config(matches);
 
 	println!(
 		"Spawning process {:?} with args {:?} in wdir {:?} on bind {}",
 		config.bin, config.args, config.wdir, config.bind
 	);
 
-	let (server_write, server_read) = mpsc::channel();
-	let (client_write, client_read) = mpsc::channel();
+	let command_request = mpsc::channel();
+	let command_response: (
+		// requires manually assigning types for some odd reason
+		Sender<ServerCommandResponse>,
+		Receiver<ServerCommandResponse>,
+	) = mpsc::channel();
 
-	// let (recorder_write, recorder_read) = mpsc::channel::<String>();
-	// let (recorder_request_record, recorder_respond_record) = mpsc::channel::<()>();
+	let child_read_request = mpsc::channel();
+	// let child_read_response = mpsc::channel();
+
+	{
+		child_read_request
+			.0
+			.send(ChildReadRequest {
+				command: "uwu".to_string(),
+				ip: Ipv4Addr::new(0, 0, 0, 0).into(),
+			})
+			.unwrap();
+
+		dbg!(child_read_request.1.recv().unwrap());
+
+		// child_read_response
+		// 	.0
+		// 	.send(ChildReadResponse {
+		// 		body: "uwu".to_string(),
+		// 	})
+		// 	.unwrap();
+
+		// dbg!(child_read_response.1.recv().unwrap());
+	}
 
 	let mut proc = std::process::Command::new(config.bin.canonicalize().unwrap());
 
-	thread::spawn(move || {
-		let sockaddr: SocketAddr = config.bind;
-
-		let listener = TcpListener::bind(sockaddr).unwrap();
-
-		loop {
-			let (mut stream, addr) = listener.accept().unwrap();
-
-			if config.is_whitelist {
-				if !config.ips.contains(&addr.ip()) {
-					stream.shutdown(std::net::Shutdown::Both).ok();
-					break;
-				}
-			} else {
-				if config.ips.contains(&addr.ip()) {
-					stream.shutdown(std::net::Shutdown::Both).ok();
-					break;
-				}
-			}
-
-			loop {
-				let mut sized_buf = [0; 4096];
-				stream.read(&mut sized_buf).unwrap();
-
-				let received_packet = deserialize_packet(&sized_buf);
-
-				match received_packet.ptype {
-					0 => {
-						if sized_buf == [0; 4096] {
-							// println!("client exit");
-							stream.shutdown(std::net::Shutdown::Both).ok();
-							break;
-						}
-					}
-
-					2 => {
-						// println!("rec 2");
-
-						let buf = received_packet.body;
-						// stream.read_to_string(&mut buf).unwrap();
-
-						server_write.send(buf.clone()).unwrap();
-
-						let client_body = format!(
-							"Server Received Command: {}\n{}\0",
-							buf,
-							client_read.recv().unwrap()
-						);
-
-						let packet = RconPacket {
-							size: (9 + client_body.len()) as i32,
-							id: received_packet.id,
-							ptype: 0,
-							body: client_body,
-						};
-
-						let response_buf = serialize_packet(&packet);
-						stream.write_all(&response_buf).unwrap();
-						stream.flush().unwrap();
-					}
-					3 => {
-						let packet = if received_packet.body == config.admin_password {
-							RconPacket {
-								size: 10,
-								id: received_packet.id,
-								ptype: 2,
-								body: "\0".to_string(),
-							}
-						} else {
-							RconPacket {
-								size: 10,
-								id: -1,
-								ptype: 2,
-								body: "\0".to_string(),
-							}
-						};
-
-						let response_buf = serialize_packet(&packet);
-						stream.write_all(&response_buf).unwrap();
-						stream.flush().unwrap();
-					}
-					_ => {
-						eprintln!("{}", received_packet.ptype);
-						break;
-					}
-				}
-			}
-		}
-	});
-
 	let proc = proc
 		.stdin(Stdio::piped())
-		.stderr(Stdio::inherit())
-		.stdout(Stdio::inherit())
+		.stderr(Stdio::piped())
+		.stdout(Stdio::piped())
 		.current_dir(config.wdir.canonicalize().unwrap())
 		.args(config.args)
 		.spawn();
@@ -327,14 +302,242 @@ fn main() {
 	match proc {
 		Ok(mut child) => {
 			let mut stdin_pipe = child.stdin.take().expect("could not take stdin");
-			// let mut stdout_pipe = Arc::new(Mutex::new(
-			// 	child.stdout.take().expect("could not take stdout"),
-			// ));
-			// let mut stderr_pipe = child.stderr.take().expect("could not take stderr");
+			let mut stdout_pipe = child.stdout.take().expect("could not take stdout");
+			let connected_clients: Arc<Mutex<HashMap<(IpAddr, String), String>>> =
+				Arc::new(Mutex::new(HashMap::new()));
+
+			// let console_lines: Arc<Mutex<Vec<char>>> = Arc::new(Mutex::new(vec![]));
+
+			// TODO thread to send empty packets to running command senders
+
+			let connected_clients_t01 = connected_clients.clone();
+
+			thread::spawn(move || {
+				let mut string_buffer = String::new();
+				let mut response_string_buffer = String::new();
+				loop {
+					let bs = stdout_pipe.by_ref().bytes();
+
+					for b in bs {
+						let b = b.unwrap() as char;
+						string_buffer.push(b);
+
+						if b == '\n' {
+							// console_lines.lock().unwrap().push(b);
+							print!("{}", string_buffer);
+							// TODO ip verification with ((^\s*((([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5]))\s*$)|(^\s*((([0-9A-Fa-f]{1,4}:){7}([0-9A-Fa-f]{1,4}|:))|(([0-9A-Fa-f]{1,4}:){6}(:[0-9A-Fa-f]{1,4}|((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9A-Fa-f]{1,4}:){5}(((:[0-9A-Fa-f]{1,4}){1,2})|:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9A-Fa-f]{1,4}:){4}(((:[0-9A-Fa-f]{1,4}){1,3})|((:[0-9A-Fa-f]{1,4})?:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){3}(((:[0-9A-Fa-f]{1,4}){1,4})|((:[0-9A-Fa-f]{1,4}){0,2}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){2}(((:[0-9A-Fa-f]{1,4}){1,5})|((:[0-9A-Fa-f]{1,4}){0,3}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){1}(((:[0-9A-Fa-f]{1,4}){1,6})|((:[0-9A-Fa-f]{1,4}){0,4}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(:(((:[0-9A-Fa-f]{1,4}){1,7})|((:[0-9A-Fa-f]{1,4}){0,5}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:)))(%.+)?\s*$))
+							if regex::Regex::new(".*RCON_COMMAND_START\\[.+\\]\\[.+\\].*")
+								.unwrap()
+								.is_match(&string_buffer)
+							{
+								// println!("START MATCH");
+
+								let command = {
+									let mut command = String::new();
+
+									let base = "RCON_COMMAND_START".as_bytes();
+									let mut index = 0;
+
+									for c in string_buffer.char_indices() {
+										// println!("{}", base[i + correct] as char);
+
+										if index >= base.len() {
+											// index = 0;
+
+											let mut is_recording = false;
+
+											for cc in c.0..string_buffer.len() - 1 {
+												let cc = string_buffer.as_bytes()[cc] as char;
+												// println!("{}", cc);
+
+												if cc == ']' {
+													break;
+												}
+
+												if is_recording {
+													command.push(cc);
+												}
+
+												if cc == '[' {
+													is_recording = true;
+												}
+											}
+
+											break;
+										} else if base[index] as char == c.1 {
+											index += 1;
+										}
+									}
+									command
+								};
+								
+								let ip = {
+									let mut ip = String::new();
+
+									let base = "RCON_COMMAND_START".as_bytes();
+									let mut index = 0;
+
+									for c in string_buffer.char_indices() {
+										// println!("{}", base[i + correct] as char);
+
+										if index >= base.len() {
+											// index = 0;
+
+											let mut is_recording = false;
+
+											for cc in c.0..string_buffer.len() - 1 {
+												let cc = string_buffer.as_bytes()[cc] as char;
+												// println!("{}", cc);
+
+												if cc == ']' {
+													break;
+												}
+
+												if is_recording {
+													ip.push(cc);
+												}
+
+												if cc == '[' {
+													is_recording = true;
+												}
+											}
+
+											break;
+										} else if base[index] as char == c.1 {
+											index += 1;
+										}
+									}
+									ip
+								};
+
+								println!("CCMD: {}, IP: {}", command, ip);
+							} else if regex::Regex::new(".*RCON_COMMAND_END\\[.+\\]\\[.+\\]")
+								.unwrap()
+								.is_match(&string_buffer)
+							{
+								println!("END MATCH");
+							}
+
+							string_buffer.clear();
+						}
+					}
+				}
+			});
+
+			thread::spawn(move || loop {
+				let read_request = child_read_request.1.recv().unwrap();
+				let mut connected_clients = connected_clients_t01.lock().unwrap();
+				connected_clients.insert(
+					(read_request.ip, read_request.command.clone()),
+					String::new(),
+				);
+
+				thread::sleep(Duration::new(4, 0));
+
+				connected_clients.insert(
+					(read_request.ip, read_request.command),
+					"some shit".to_string(),
+				);
+			});
+
+			thread::spawn(move || {
+				let sockaddr: SocketAddr = config.bind;
+
+				let listener = TcpListener::bind(sockaddr).unwrap();
+
+				loop {
+					let (mut stream, addr) = listener.accept().unwrap();
+
+					if config.is_whitelist {
+						if !config.ips.contains(&addr.ip()) {
+							stream.shutdown(std::net::Shutdown::Both).ok();
+							break;
+						}
+					} else {
+						if config.ips.contains(&addr.ip()) {
+							stream.shutdown(std::net::Shutdown::Both).ok();
+							break;
+						}
+					}
+
+					loop {
+						let mut sized_buf = [0; 4096];
+						stream.read(&mut sized_buf).unwrap();
+
+						let received_packet = deserialize_packet(&sized_buf);
+
+						match received_packet.ptype {
+							0 => {
+								if sized_buf == [0; 4096] {
+									// println!("client exit");
+									stream.shutdown(std::net::Shutdown::Both).ok();
+									break;
+								}
+							}
+
+							2 => {
+								// println!("rec 2");
+
+								let buf = received_packet.body;
+								// stream.read_to_string(&mut buf).unwrap();
+
+								let command_request_struct = ServerCommandRequest {
+									command: buf.clone(),
+									ip: addr.ip(),
+								};
+
+								command_request.0.send(command_request_struct).unwrap();
+
+								let client_body = format!(
+									"Server Received Command: {}\nResponse:\n{}\0",
+									buf,
+									command_response.1.recv().unwrap().body
+								);
+
+								let packet = RconPacket {
+									size: (9 + client_body.len()) as i32,
+									id: received_packet.id,
+									ptype: 0,
+									body: client_body,
+								};
+
+								let response_buf = serialize_packet(&packet);
+								stream.write_all(&response_buf).unwrap();
+								stream.flush().unwrap();
+							}
+							3 => {
+								let packet = if received_packet.body == config.admin_password {
+									RconPacket {
+										size: 10,
+										id: received_packet.id,
+										ptype: 2,
+										body: "\0".to_string(),
+									}
+								} else {
+									RconPacket {
+										size: 10,
+										id: -1,
+										ptype: 2,
+										body: "\0".to_string(),
+									}
+								};
+
+								let response_buf = serialize_packet(&packet);
+								stream.write_all(&response_buf).unwrap();
+								stream.flush().unwrap();
+							}
+							_ => {
+								eprintln!("{}", received_packet.ptype);
+								break;
+							}
+						}
+					}
+				}
+			});
 
 			loop {
-				match server_read.recv_timeout(Duration::new(1, 0)) {
-					Ok(to_write) => {
+				match command_request.1.recv_timeout(Duration::new(1, 0)) {
+					Ok(command_request) => {
 						/*
 						recording thread that constantly prints pipe to stdout, and if request to record, copy to record
 							potential bug when multiple commands execute at once? impossible, nature of stdin makes running multiple commands running at once impossible
@@ -347,15 +550,58 @@ fn main() {
 									start and exit commands with originating ip and username when supported to act as splits between commands to help with above
 
 						*/
-						
-						println!(); // to prevent strange logging
-						// start recording stdout
+
+						println!(); // to prevent strange logging in host
+
+						child_read_request
+							.0
+							.send(ChildReadRequest {
+								command: command_request.command.clone(),
+								ip: command_request.ip,
+							})
+							.unwrap();
+
 						stdin_pipe
-							.write_all(format!("{}\n", to_write).as_bytes())
+							.write_all(format!("say RCON_COMMAND_START[{0}][{1}]\n{0}\nsay RCON_COMMAND_END[{0}][{1}]\n", command_request.command, command_request.ip).as_bytes()) // TODO make configurable start/stop commands
 							.expect("could not write to stdin of child");
 						stdin_pipe.flush().unwrap();
-						// stop recording stdout and save to RESPONSE
-						client_write.send("RESPONSE").unwrap();
+
+						let response = {
+							let response;
+							loop {
+								let mut clients = connected_clients.lock().unwrap();
+
+								if clients.contains_key(&(
+									command_request.ip,
+									command_request.command.clone(),
+								)) && !clients
+									.get(&(command_request.ip, command_request.command.clone()))
+									.unwrap()
+									.is_empty()
+								{
+									response = clients
+										.get(&(command_request.ip, command_request.command.clone()))
+										.unwrap()
+										.to_string();
+									dbg!(&clients);
+									clients.remove_entry(&(
+										command_request.ip,
+										command_request.command.clone(),
+									));
+									break;
+								}
+							}
+							response
+						};
+
+						command_response
+							.0
+							.send(ServerCommandResponse {
+								body: response,
+								ip: command_request.ip,
+								command: command_request.command,
+							})
+							.unwrap();
 					}
 					Err(_) => match child.try_wait() {
 						Ok(Some(_)) => break,
